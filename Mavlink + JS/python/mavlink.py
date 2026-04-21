@@ -28,6 +28,8 @@ groundspeed = airspeed = heading = pitch = yaw = roll = None
 gps_timestamp = system_time = attitude_time = global_position_time = None
 voltage_battery = current_battery = battery_remaining = None
 mavlog = None
+flight_mode = None
+armed = None
 
 # ============================================================
 # Funciones de utilidad
@@ -165,9 +167,23 @@ def process_mavlink_message(msg):
         except:
             pass
     
+    elif msg.get_type() == 'HEARTBEAT':
+        try:
+            global flight_mode, armed
+            ARDUCOPTER_MODES = {
+                0: 'STABILIZE', 1: 'ACRO', 2: 'ALT_HOLD', 3: 'AUTO',
+                4: 'GUIDED', 5: 'LOITER', 6: 'RTL', 7: 'CIRCLE',
+                9: 'LAND', 11: 'DRIFT', 13: 'SPORT', 16: 'POSHOLD',
+                17: 'BRAKE', 18: 'THROW', 21: 'SMART_RTL'
+            }
+            armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+            flight_mode = ARDUCOPTER_MODES.get(msg.custom_mode, f'MODE_{msg.custom_mode}')
+        except:
+            pass
+
     elif msg.get_type() == 'BATTERY_STATUS':
         try:
-            voltage_battery = msg.voltages[0] / 1000.0 if msg.voltages[0] != 65535 else None  
+            voltage_battery = msg.voltages[0] / 1000.0 if msg.voltages[0] != 65535 else None
             current_battery = msg.current_battery / 100.0 if msg.current_battery != -1 else None
             battery_remaining = msg.battery_remaining if msg.battery_remaining != -1 else None
         except:
@@ -832,7 +848,7 @@ def mqtt_publisher(broker_pub, port_pub, topic_pub, broker_sub, port_sub, topic_
     """
     Publica telemetría periódicamente al broker MQTT
     """
-    global latitude, longitude, altitude_agl, altitude_ahl, altitude_asl, groundspeed, airspeed, heading, pitch, yaw, roll, gps_timestamp, system_time, attitude_time, global_position_time, voltage_battery, current_battery, battery_remaining
+    global latitude, longitude, altitude_agl, altitude_ahl, altitude_asl, groundspeed, airspeed, heading, pitch, yaw, roll, gps_timestamp, system_time, attitude_time, global_position_time, voltage_battery, current_battery, battery_remaining, flight_mode, armed
     
     client = paho.Client(client_id='SIR_Client', transport='websockets', callback_api_version=paho.CallbackAPIVersion.VERSION1)
     client.username_pw_set('bcn', 'Barcelona_1234')
@@ -854,10 +870,14 @@ def mqtt_publisher(broker_pub, port_pub, topic_pub, broker_sub, port_sub, topic_
             send_mavlink_commands()
             
             while True:
-                msg = mavlog.recv_match(type=['SYSTEM_TIME','RAW_IMU','VFR_HUD', 'GPS_RAW_INT', 
-                                            'SERVO_OUTPUT_RAW', 'ATTITUDE', 'GLOBAL_POSITION_INT', 
-                                            'TERRAIN_REPORT', 'SCALED_PRESSURE3', 'SYS_STATUS'], 
-                                      blocking=False)
+                msg = mavlog.recv_match(
+                    type=['SYSTEM_TIME', 'RAW_IMU', 'VFR_HUD', 'GPS_RAW_INT',
+                        'SERVO_OUTPUT_RAW', 'ATTITUDE', 'GLOBAL_POSITION_INT',
+                        'TERRAIN_REPORT', 'SCALED_PRESSURE3', 'SYS_STATUS',
+                        'HEARTBEAT', 'BATTERY_STATUS'],
+                    blocking=True,   # ← cambia a True
+                    timeout=0.02     # ← 20ms máximo de espera
+                )
                 if msg is None:
                     break
                 process_mavlink_message(msg)
@@ -885,6 +905,8 @@ def mqtt_publisher(broker_pub, port_pub, topic_pub, broker_sub, port_sub, topic_
                 'roll': roll,
                 'yaw': yaw,
                 'voltage_battery': voltage_battery,
+                'flight_mode': flight_mode,   # ← añade
+                'armed': armed,
                 'drone_id': f"{mavlog.target_system}_{mavlog.target_component}"
             }
             payload = json.dumps(msg, indent=4)
@@ -1026,6 +1048,7 @@ if __name__ == "__main__":
     mqtt_thread = threading.Thread(target=mqtt_publisher, args=(broker, port, topic_pub, broker, port, topic_sub))
     mqtt_thread.daemon = True
     mqtt_thread.start()
+
 
     print("\n🌐 Levantando servidor HTTP en puerto 5000")
     print("📡 Endpoints disponibles:")
