@@ -751,6 +751,73 @@ def process_command(json_data):
                     print(f"⚠️ ACK final: {ack}")
             return
 
+        elif action == 'CLEAR_INCLUSION_FENCE':
+            # Borra las fences de inclusión, preserva las de exclusión
+            print("🗑️ Borrando fence de inclusión...")
+            with mavlink_io_lock:
+                existing = get_existing_fences()
+
+                exclusions = [i for i in existing
+                              if i['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION]
+
+                # Limpiar todo
+                mavlog.mav.mission_clear_all_send(
+                    mavlog.target_system, mavlog.target_component,
+                    mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                )
+                mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
+
+                _flush_mavlink_buffer(duration=0.5)
+
+                if len(exclusions) == 0:
+                    mavlog.mav.param_set_send(
+                        mavlog.target_system, mavlog.target_component,
+                        b'FENCE_ENABLE', 0,
+                        mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+                    )
+                    print("✅ Inclusión borrada, no había exclusiones, fence desactivada")
+                    return
+
+                # Reenviar solo las exclusiones
+                mavlog.mav.param_set_send(
+                    mavlog.target_system, mavlog.target_component,
+                    b'FENCE_TYPE', 8,  # solo exclusión
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+                )
+                time.sleep(0.3)
+
+                mavlog.mav.mission_count_send(
+                    mavlog.target_system, mavlog.target_component,
+                    len(exclusions),
+                    mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                )
+
+                for seq, item in enumerate(exclusions):
+                    req = _wait_mission_request(seq)
+                    if req is None:
+                        return
+                    mavlog.mav.mission_item_int_send(
+                        mavlog.target_system, mavlog.target_component,
+                        seq,
+                        mavutil.mavlink.MAV_FRAME_GLOBAL,
+                        item['command'],
+                        0, 1,
+                        int(item['param1']),
+                        0, 0, 0,
+                        int(item['lat'] * 1e7),
+                        int(item['lon'] * 1e7),
+                        0,
+                        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                    )
+                    print(f"   ♻️ Exclusión reenviada seq={seq}")
+
+                ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=10)
+                if ack and getattr(ack, 'type', None) == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                    print("✅ Inclusión borrada, exclusiones preservadas")
+                else:
+                    print(f"⚠️ ACK final: {ack}")
+            return
+
         # ============================================================
         # COMANDO AUTO (MISIÓN)
         # ============================================================
@@ -1033,7 +1100,7 @@ def action_handler():
         action = msg.get('action')
         
         acciones_emergencia = ['ARM', 'TAKEOFF', 'DISARM', 'EMERGENCY_STOP', 'RTL', 'LAND_NOW', 'HOLD_POSITION']
-        acciones_normales = ['AUTO', 'GUIDED', 'FENCE', 'EXCLUSION_FENCE', 'CLEAR_FENCES', 'CLEAR_EXCLUSION_FENCES']
+        acciones_normales = ['AUTO', 'GUIDED', 'FENCE', 'EXCLUSION_FENCE', 'CLEAR_FENCES', 'CLEAR_EXCLUSION_FENCES', 'CLEAR_INCLUSION_FENCE']
         
         if action in acciones_emergencia:
             print(f"🚨 Comando de emergencia: {action}")
