@@ -262,13 +262,19 @@ def _send_fence_locked(vertices, breach_action='RTL'):
         # ❌ Saltar fences de inclusión anteriores
         if item['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION:
             continue
-            
+
         req = mavlog.recv_match(
-            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
+            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT', 'MISSION_ACK'],
             blocking=True, timeout=5
         )
-        if req is None or req.seq != seq:
-            print(f"   ❌ Error en secuencia al reenviar existente {seq}")
+        if req is None:
+            print(f"   ❌ Timeout esperando request para existente seq={seq}")
+            return
+        if req.get_type() == 'MISSION_ACK':
+            print(f"   ❌ MISSION_ACK inesperado (error del autopiloto): type={req.type}")
+            return
+        if req.seq != seq:
+            print(f"   ❌ Secuencia incorrecta: esperado {seq}, recibido {req.seq}")
             return
 
         mavlog.mav.mission_item_int_send(
@@ -291,11 +297,17 @@ def _send_fence_locked(vertices, breach_action='RTL'):
     print("4️⃣ Enviando nueva fence de inclusión...")
     for vertex in vertices:
         req = mavlog.recv_match(
-            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
+            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT', 'MISSION_ACK'],
             blocking=True, timeout=5
         )
-        if req is None or req.seq != seq:
-            print(f"   ❌ Timeout o secuencia incorrecta en seq={seq}")
+        if req is None:
+            print(f"   ❌ Timeout esperando request para vértice seq={seq}")
+            return
+        if req.get_type() == 'MISSION_ACK':
+            print(f"   ❌ MISSION_ACK inesperado (error del autopiloto): type={req.type}")
+            return
+        if req.seq != seq:
+            print(f"   ❌ Secuencia incorrecta: esperado {seq}, recibido {req.seq} (tipo: {req.get_type()})")
             return
 
         mavlog.mav.mission_item_int_send(
@@ -434,11 +446,17 @@ def _send_exclusion_fence_locked(zones, breach_action='RTL'):
     seq = 0
     for item in existing:
         req = mavlog.recv_match(
-            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
+            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT', 'MISSION_ACK'],
             blocking=True, timeout=5
         )
-        if req is None or req.seq != seq:
-            print(f"   ❌ Error en secuencia al reenviar existente {seq}")
+        if req is None:
+            print(f"   ❌ Timeout esperando request para existente seq={seq}")
+            return
+        if req.get_type() == 'MISSION_ACK':
+            print(f"   ❌ MISSION_ACK inesperado (error del autopiloto): type={req.type}")
+            return
+        if req.seq != seq:
+            print(f"   ❌ Secuencia incorrecta: esperado {seq}, recibido {req.seq}")
             return
 
         mavlog.mav.mission_item_int_send(
@@ -454,7 +472,7 @@ def _send_exclusion_fence_locked(zones, breach_action='RTL'):
             0,
             mavutil.mavlink.MAV_MISSION_TYPE_FENCE
         )
-        print(f"   ♻️ Rereenviado existente {seq}: CMD={item['command']}")
+        print(f"   ♻️ Reenviado existente {seq}: CMD={item['command']}")
         seq += 1
 
     # 7. Enviar nuevas zonas de exclusión
@@ -463,11 +481,17 @@ def _send_exclusion_fence_locked(zones, breach_action='RTL'):
         print(f"   🔴 Zona {zone_idx + 1}: {len(zone)} vértices")
         for vertex in zone:
             req = mavlog.recv_match(
-                type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
+                type=['MISSION_REQUEST', 'MISSION_REQUEST_INT', 'MISSION_ACK'],
                 blocking=True, timeout=5
             )
-            if req is None or req.seq != seq:
-                print(f"   ❌ Timeout o secuencia incorrecta en seq={seq}")
+            if req is None:
+                print(f"   ❌ Timeout esperando request para vértice seq={seq}")
+                return
+            if req.get_type() == 'MISSION_ACK':
+                print(f"   ❌ MISSION_ACK inesperado (error del autopiloto): type={req.type}")
+                return
+            if req.seq != seq:
+                print(f"   ❌ Secuencia incorrecta: esperado {seq}, recibido {req.seq} (tipo: {req.get_type()})")
                 return
 
             mavlog.mav.mission_item_int_send(
@@ -883,8 +907,13 @@ def mqtt_publisher(broker_pub, port_pub, topic_pub, broker_sub, port_sub, topic_
     
     while True:
         try:
-            send_mavlink_commands()
-            
+            # send_mavlink_commands también debe ceder cuando hay un comando activo
+            if mavlink_io_lock.acquire(blocking=False):
+                try:
+                    send_mavlink_commands()
+                finally:
+                    mavlink_io_lock.release()
+
             while True:
                 # Si hay una operación de fence/comando activa, ceder el acceso
                 if not mavlink_io_lock.acquire(blocking=False):
