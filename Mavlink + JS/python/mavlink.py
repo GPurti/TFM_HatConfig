@@ -212,7 +212,11 @@ def _flush_mavlink_buffer(duration=0.3):
 
 def _wait_mission_request(expected_seq, timeout=5):
     """Espera MISSION_REQUEST/MISSION_REQUEST_INT para expected_seq.
-    Ignora MISSION_REQUEST de otros mission_type (p.ej. lista de misión normal).
+    No filtra por mission_type: algunas versiones de ArduPilot no
+    populan ese campo y pymavlink lo devuelve como 0 aunque el request
+    sea para la fence. Con mavlink_io_lock activo no hay otra operación
+    que pueda generar MISSION_REQUESTs, así que cualquier request válido
+    se acepta.
     Devuelve el mensaje, o None si hay timeout o error."""
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -224,14 +228,8 @@ def _wait_mission_request(expected_seq, timeout=5):
         if req is None:
             continue
         if req.get_type() == 'MISSION_ACK':
-            print(f"   ❌ MISSION_ACK inesperado: type={req.type} "
-                  f"({getattr(req, 'mission_type', '?')})")
+            print(f"   ❌ MISSION_ACK inesperado: type={req.type}")
             return None
-        # Ignorar requests de otro mission_type (p.ej. misión normal)
-        mt = getattr(req, 'mission_type', mavutil.mavlink.MAV_MISSION_TYPE_MISSION)
-        if mt != mavutil.mavlink.MAV_MISSION_TYPE_FENCE:
-            print(f"   ⚠️ MISSION_REQUEST ignorado (mission_type={mt}), esperando fence...")
-            continue
         if req.seq != expected_seq:
             print(f"   ❌ Secuencia incorrecta: esperado {expected_seq}, recibido {req.seq}")
             return None
