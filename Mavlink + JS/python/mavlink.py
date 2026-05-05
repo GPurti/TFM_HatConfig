@@ -20,6 +20,11 @@ app = Flask(__name__)
 emergencia_en_curso = False
 emergencia_lock = threading.Lock()
 
+# Protege el acceso concurrente al objeto mavlog entre el hilo de telemetría
+# y los hilos de comandos (fence, misión...). RLock permite reentrada desde
+# funciones que se llaman entre sí (p.ej. send_fence -> get_existing_fences).
+mavlink_io_lock = threading.RLock()
+
 # ============================================================
 # Variables globales de telemetría
 # ============================================================
@@ -190,9 +195,56 @@ def process_mavlink_message(msg):
             pass
 
 # ============================================================
+# UTILIDAD: Vaciar mensajes residuales del buffer MAVLink
+# ============================================================
+def _flush_mavlink_buffer(duration=0.3):
+    """Descarta mensajes acumulados para evitar que ACKs residuales
+    interfieran con el handshake del protocolo de misión/fence."""
+    deadline = time.time() + duration
+    discarded = 0
+    while time.time() < deadline:
+        msg = mavlog.recv_match(blocking=True, timeout=0.05)
+        if msg is None:
+            break
+        discarded += 1
+    if discarded:
+        print(f"   🧹 Flush: {discarded} mensaje(s) residual(es) descartado(s)")
+
+def _wait_mission_request(expected_seq, timeout=5):
+    """Espera MISSION_REQUEST/MISSION_REQUEST_INT para expected_seq.
+    No filtra por mission_type: algunas versiones de ArduPilot no
+    populan ese campo y pymavlink lo devuelve como 0 aunque el request
+    sea para la fence. Con mavlink_io_lock activo no hay otra operación
+    que pueda generar MISSION_REQUESTs, así que cualquier request válido
+    se acepta.
+    Devuelve el mensaje, o None si hay timeout o error."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        remaining = deadline - time.time()
+        req = mavlog.recv_match(
+            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT', 'MISSION_ACK'],
+            blocking=True, timeout=min(remaining, 1.0)
+        )
+        if req is None:
+            continue
+        if req.get_type() == 'MISSION_ACK':
+            print(f"   ❌ MISSION_ACK inesperado: type={req.type}")
+            return None
+        if req.seq != expected_seq:
+            print(f"   ❌ Secuencia incorrecta: esperado {expected_seq}, recibido {req.seq}")
+            return None
+        return req
+    print(f"   ❌ Timeout esperando MISSION_REQUEST para seq={expected_seq}")
+    return None
+
+# ============================================================
 # NUEVA FUNCIÓN: Configurar FENCE (Geofence) con RTL
 # ============================================================
 def send_fence(vertices, breach_action='RTL'):
+    with mavlink_io_lock:
+        _send_fence_locked(vertices, breach_action)
+
+def _send_fence_locked(vertices, breach_action='RTL'):
     print(f"\n{'='*60}")
     print(f"🚧 AÑADIENDO FENCE DE INCLUSIÓN con {len(vertices)} vértices")
     print(f"{'='*60}")
@@ -233,9 +285,12 @@ def send_fence(vertices, breach_action='RTL'):
         mavlog.target_system, mavlog.target_component,
         mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
-    ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
+    mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
     print(f"   ✅ Limpiado")
-    time.sleep(0.5)
+
+    # Descartar mensajes residuales (ACKs de get_existing_fences, param_set, etc.)
+    # antes de iniciar el protocolo de upload para evitar falsos positivos.
+    _flush_mavlink_buffer(duration=0.5)
 
     # Solo contar exclusiones existentes + nueva inclusión
     existing_exclusions = [i for i in existing if i['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION]
@@ -250,16 +305,11 @@ def send_fence(vertices, breach_action='RTL'):
     # 6. Reenviar existentes — SOLO las de exclusión, ignorar inclusiones anteriores
     seq = 0
     for item in existing_exclusions:
-        # ❌ Saltar fences de inclusión anteriores
         if item['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION:
             continue
-            
-        req = mavlog.recv_match(
-            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
-            blocking=True, timeout=5
-        )
-        if req is None or req.seq != seq:
-            print(f"   ❌ Error en secuencia al reenviar existente {seq}")
+
+        req = _wait_mission_request(seq)
+        if req is None:
             return
 
         mavlog.mav.mission_item_int_send(
@@ -281,12 +331,8 @@ def send_fence(vertices, breach_action='RTL'):
     # 7. Enviar nueva fence de inclusión
     print("4️⃣ Enviando nueva fence de inclusión...")
     for vertex in vertices:
-        req = mavlog.recv_match(
-            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
-            blocking=True, timeout=5
-        )
-        if req is None or req.seq != seq:
-            print(f"   ❌ Timeout o secuencia incorrecta en seq={seq}")
+        req = _wait_mission_request(seq)
+        if req is None:
             return
 
         mavlog.mav.mission_item_int_send(
@@ -315,52 +361,57 @@ def send_fence(vertices, breach_action='RTL'):
     
 def get_existing_fences():
     """Lee las fences actuales del autopiloto"""
-    print("📖 Leyendo fences existentes...")
-    
-    mavlog.mav.mission_request_list_send(
-        mavlog.target_system,
-        mavlog.target_component,
-        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
-    )
-    
-    count_msg = mavlog.recv_match(type='MISSION_COUNT', blocking=True, timeout=5)
-    if count_msg is None or count_msg.count == 0:
-        print("   📭 No hay fences existentes")
-        return []
-    
-    print(f"   📦 Hay {count_msg.count} items de fence existentes")
-    existing = []
-    
-    for i in range(count_msg.count):
-        mavlog.mav.mission_request_int_send(
+    with mavlink_io_lock:
+        print("📖 Leyendo fences existentes...")
+
+        mavlog.mav.mission_request_list_send(
             mavlog.target_system,
             mavlog.target_component,
-            i,
             mavutil.mavlink.MAV_MISSION_TYPE_FENCE
         )
-        item = mavlog.recv_match(type='MISSION_ITEM_INT', blocking=True, timeout=5)
-        if item:
-            existing.append({
-                'seq': i,
-                'command': item.command,
-                'param1': item.param1,
-                'lat': item.x / 1e7,
-                'lon': item.y / 1e7,
-            })
-            print(f"   ✅ Item {i}: CMD={item.command}, ({item.x/1e7:.6f}, {item.y/1e7:.6f})")
-    
-    # Enviar ACK
-    mavlog.mav.mission_ack_send(
-        mavlog.target_system,
-        mavlog.target_component,
-        mavutil.mavlink.MAV_MISSION_ACCEPTED,
-        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
-    )
-    
-    return existing
+
+        count_msg = mavlog.recv_match(type='MISSION_COUNT', blocking=True, timeout=5)
+        if count_msg is None or count_msg.count == 0:
+            print("   📭 No hay fences existentes")
+            return []
+
+        print(f"   📦 Hay {count_msg.count} items de fence existentes")
+        existing = []
+
+        for i in range(count_msg.count):
+            mavlog.mav.mission_request_int_send(
+                mavlog.target_system,
+                mavlog.target_component,
+                i,
+                mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+            )
+            item = mavlog.recv_match(type='MISSION_ITEM_INT', blocking=True, timeout=5)
+            if item:
+                existing.append({
+                    'seq': i,
+                    'command': item.command,
+                    'param1': item.param1,
+                    'lat': item.x / 1e7,
+                    'lon': item.y / 1e7,
+                })
+                print(f"   ✅ Item {i}: CMD={item.command}, ({item.x/1e7:.6f}, {item.y/1e7:.6f})")
+
+        # Enviar ACK
+        mavlog.mav.mission_ack_send(
+            mavlog.target_system,
+            mavlog.target_component,
+            mavutil.mavlink.MAV_MISSION_ACCEPTED,
+            mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+        )
+
+        return existing
 
 
 def send_exclusion_fence(zones, breach_action='RTL'):
+    with mavlink_io_lock:
+        _send_exclusion_fence_locked(zones, breach_action)
+
+def _send_exclusion_fence_locked(zones, breach_action='RTL'):
     print(f"\n{'='*60}")
     print(f"🚫 AÑADIENDO {len(zones)} ZONA(S) DE EXCLUSIÓN")
     print(f"{'='*60}")
@@ -402,9 +453,11 @@ def send_exclusion_fence(zones, breach_action='RTL'):
         mavlog.target_system, mavlog.target_component,
         mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
-    ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
+    mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
     print(f"   ✅ Limpiado")
-    time.sleep(0.5)
+
+    # Descartar mensajes residuales antes de iniciar el upload
+    _flush_mavlink_buffer(duration=0.5)
 
     # 5. Total = existentes + nuevos
     new_points = sum(len(zone) for zone in zones)
@@ -419,12 +472,8 @@ def send_exclusion_fence(zones, breach_action='RTL'):
     # 6. Reenviar existentes
     seq = 0
     for item in existing:
-        req = mavlog.recv_match(
-            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
-            blocking=True, timeout=5
-        )
-        if req is None or req.seq != seq:
-            print(f"   ❌ Error en secuencia al reenviar existente {seq}")
+        req = _wait_mission_request(seq)
+        if req is None:
             return
 
         mavlog.mav.mission_item_int_send(
@@ -440,7 +489,7 @@ def send_exclusion_fence(zones, breach_action='RTL'):
             0,
             mavutil.mavlink.MAV_MISSION_TYPE_FENCE
         )
-        print(f"   ♻️ Rereenviado existente {seq}: CMD={item['command']}")
+        print(f"   ♻️ Reenviado existente {seq}: CMD={item['command']}")
         seq += 1
 
     # 7. Enviar nuevas zonas de exclusión
@@ -448,12 +497,8 @@ def send_exclusion_fence(zones, breach_action='RTL'):
     for zone_idx, zone in enumerate(zones):
         print(f"   🔴 Zona {zone_idx + 1}: {len(zone)} vértices")
         for vertex in zone:
-            req = mavlog.recv_match(
-                type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
-                blocking=True, timeout=5
-            )
-            if req is None or req.seq != seq:
-                print(f"   ❌ Timeout o secuencia incorrecta en seq={seq}")
+            req = _wait_mission_request(seq)
+            if req is None:
                 return
 
             mavlog.mav.mission_item_int_send(
@@ -621,87 +666,89 @@ def process_command(json_data):
         elif action == 'CLEAR_FENCES':
             # Borra TODO (inclusión + exclusión)
             print("🗑️ Borrando todas las fences...")
-            mavlog.mav.mission_clear_all_send(
-                mavlog.target_system, mavlog.target_component,
-                mavutil.mavlink.MAV_MISSION_TYPE_FENCE
-            )
-            mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
-            mavlog.mav.param_set_send(
-                mavlog.target_system, mavlog.target_component,
-                b'FENCE_ENABLE', 0,
-                mavutil.mavlink.MAV_PARAM_TYPE_REAL32
-            )
+            with mavlink_io_lock:
+                mavlog.mav.mission_clear_all_send(
+                    mavlog.target_system, mavlog.target_component,
+                    mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                )
+                mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
+                mavlog.mav.param_set_send(
+                    mavlog.target_system, mavlog.target_component,
+                    b'FENCE_ENABLE', 0,
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+                )
             print("✅ Todas las fences borradas")
             return
 
         elif action == 'CLEAR_EXCLUSION_FENCES':
             # Lee existentes, descarta exclusiones, reenvía solo inclusiones
             print("🗑️ Borrando solo fences de exclusión...")
-            existing = get_existing_fences()
-            
-            inclusions = [i for i in existing 
-                        if i['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION]
-            
-            # Limpiar todo
-            mavlog.mav.mission_clear_all_send(
-                mavlog.target_system, mavlog.target_component,
-                mavutil.mavlink.MAV_MISSION_TYPE_FENCE
-            )
-            mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
-            time.sleep(0.5)
-            
-            if len(inclusions) == 0:
-                # No hay inclusiones que preservar, desactivar fence
-                mavlog.mav.param_set_send(
+            with mavlink_io_lock:
+                existing = get_existing_fences()
+
+                inclusions = [i for i in existing
+                            if i['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION]
+
+                # Limpiar todo
+                mavlog.mav.mission_clear_all_send(
                     mavlog.target_system, mavlog.target_component,
-                    b'FENCE_ENABLE', 0,
-                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32
-                )
-                print("✅ Exclusiones borradas, no había inclusiones, fence desactivada")
-                return
-            
-            # Reenviar solo las inclusiones
-            mavlog.mav.param_set_send(
-                mavlog.target_system, mavlog.target_component,
-                b'FENCE_TYPE', 4,  # solo inclusión
-                mavutil.mavlink.MAV_PARAM_TYPE_REAL32
-            )
-            time.sleep(0.3)
-            
-            mavlog.mav.mission_count_send(
-                mavlog.target_system, mavlog.target_component,
-                len(inclusions),
-                mavutil.mavlink.MAV_MISSION_TYPE_FENCE
-            )
-            
-            for seq, item in enumerate(inclusions):
-                req = mavlog.recv_match(
-                    type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
-                    blocking=True, timeout=5
-                )
-                if req is None or req.seq != seq:
-                    print(f"   ❌ Error en secuencia {seq}")
-                    return
-                mavlog.mav.mission_item_int_send(
-                    mavlog.target_system, mavlog.target_component,
-                    seq,
-                    mavutil.mavlink.MAV_FRAME_GLOBAL,
-                    item['command'],
-                    0, 1,
-                    int(item['param1']),
-                    0, 0, 0,
-                    int(item['lat'] * 1e7),
-                    int(item['lon'] * 1e7),
-                    0,
                     mavutil.mavlink.MAV_MISSION_TYPE_FENCE
                 )
-                print(f"   ♻️ Inclusión reenviada seq={seq}")
-            
-            ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=10)
-            if ack and getattr(ack, 'type', None) == mavutil.mavlink.MAV_MISSION_ACCEPTED:
-                print("✅ Exclusiones borradas, inclusiones preservadas")
-            else:
-                print(f"⚠️ ACK final: {ack}")
+                mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
+                time.sleep(0.5)
+
+                if len(inclusions) == 0:
+                    # No hay inclusiones que preservar, desactivar fence
+                    mavlog.mav.param_set_send(
+                        mavlog.target_system, mavlog.target_component,
+                        b'FENCE_ENABLE', 0,
+                        mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+                    )
+                    print("✅ Exclusiones borradas, no había inclusiones, fence desactivada")
+                    return
+
+                # Reenviar solo las inclusiones
+                mavlog.mav.param_set_send(
+                    mavlog.target_system, mavlog.target_component,
+                    b'FENCE_TYPE', 4,  # solo inclusión
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32
+                )
+                time.sleep(0.3)
+
+                mavlog.mav.mission_count_send(
+                    mavlog.target_system, mavlog.target_component,
+                    len(inclusions),
+                    mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                )
+
+                for seq, item in enumerate(inclusions):
+                    req = mavlog.recv_match(
+                        type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
+                        blocking=True, timeout=5
+                    )
+                    if req is None or req.seq != seq:
+                        print(f"   ❌ Error en secuencia {seq}")
+                        return
+                    mavlog.mav.mission_item_int_send(
+                        mavlog.target_system, mavlog.target_component,
+                        seq,
+                        mavutil.mavlink.MAV_FRAME_GLOBAL,
+                        item['command'],
+                        0, 1,
+                        int(item['param1']),
+                        0, 0, 0,
+                        int(item['lat'] * 1e7),
+                        int(item['lon'] * 1e7),
+                        0,
+                        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                    )
+                    print(f"   ♻️ Inclusión reenviada seq={seq}")
+
+                ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=10)
+                if ack and getattr(ack, 'type', None) == mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                    print("✅ Exclusiones borradas, inclusiones preservadas")
+                else:
+                    print(f"⚠️ ACK final: {ack}")
             return
 
         # ============================================================
@@ -867,17 +914,29 @@ def mqtt_publisher(broker_pub, port_pub, topic_pub, broker_sub, port_sub, topic_
     
     while True:
         try:
-            send_mavlink_commands()
-            
+            # send_mavlink_commands también debe ceder cuando hay un comando activo
+            if mavlink_io_lock.acquire(blocking=False):
+                try:
+                    send_mavlink_commands()
+                finally:
+                    mavlink_io_lock.release()
+
             while True:
-                msg = mavlog.recv_match(
-                    type=['SYSTEM_TIME', 'RAW_IMU', 'VFR_HUD', 'GPS_RAW_INT',
-                        'SERVO_OUTPUT_RAW', 'ATTITUDE', 'GLOBAL_POSITION_INT',
-                        'TERRAIN_REPORT', 'SCALED_PRESSURE3', 'SYS_STATUS',
-                        'HEARTBEAT', 'BATTERY_STATUS'],
-                    blocking=True,   # ← cambia a True
-                    timeout=0.02     # ← 20ms máximo de espera
-                )
+                # Si hay una operación de fence/comando activa, ceder el acceso
+                if not mavlink_io_lock.acquire(blocking=False):
+                    time.sleep(0.005)
+                    break
+                try:
+                    msg = mavlog.recv_match(
+                        type=['SYSTEM_TIME', 'RAW_IMU', 'VFR_HUD', 'GPS_RAW_INT',
+                            'SERVO_OUTPUT_RAW', 'ATTITUDE', 'GLOBAL_POSITION_INT',
+                            'TERRAIN_REPORT', 'SCALED_PRESSURE3', 'SYS_STATUS',
+                            'HEARTBEAT', 'BATTERY_STATUS'],
+                        blocking=True,
+                        timeout=0.02
+                    )
+                finally:
+                    mavlink_io_lock.release()
                 if msg is None:
                     break
                 process_mavlink_message(msg)
