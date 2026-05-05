@@ -231,7 +231,7 @@ def send_fence(vertices, breach_action='RTL'):
     print("2️⃣ Limpiando fence anterior...")
     mavlog.mav.mission_clear_all_send(
         mavlog.target_system, mavlog.target_component,
-        mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
     ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
     print(f"   ✅ Limpiado")
@@ -244,7 +244,7 @@ def send_fence(vertices, breach_action='RTL'):
     mavlog.mav.mission_count_send(
         mavlog.target_system, mavlog.target_component,
         total_points,
-        mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
 
     # 6. Reenviar existentes — SOLO las de exclusión, ignorar inclusiones anteriores
@@ -320,7 +320,7 @@ def get_existing_fences():
     mavlog.mav.mission_request_list_send(
         mavlog.target_system,
         mavlog.target_component,
-        mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
     
     count_msg = mavlog.recv_match(type='MISSION_COUNT', blocking=True, timeout=5)
@@ -336,7 +336,7 @@ def get_existing_fences():
             mavlog.target_system,
             mavlog.target_component,
             i,
-            mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+            mavutil.mavlink.MAV_MISSION_TYPE_FENCE
         )
         item = mavlog.recv_match(type='MISSION_ITEM_INT', blocking=True, timeout=5)
         if item:
@@ -354,7 +354,7 @@ def get_existing_fences():
         mavlog.target_system,
         mavlog.target_component,
         mavutil.mavlink.MAV_MISSION_ACCEPTED,
-        mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
     
     return existing
@@ -400,7 +400,7 @@ def send_exclusion_fence(zones, breach_action='RTL'):
     print("2️⃣ Limpiando fence anterior...")
     mavlog.mav.mission_clear_all_send(
         mavlog.target_system, mavlog.target_component,
-        mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
     ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
     print(f"   ✅ Limpiado")
@@ -413,7 +413,7 @@ def send_exclusion_fence(zones, breach_action='RTL'):
     mavlog.mav.mission_count_send(
         mavlog.target_system, mavlog.target_component,
         total_points,
-        mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+        mavutil.mavlink.MAV_MISSION_TYPE_FENCE
     )
 
     # 6. Reenviar existentes
@@ -623,7 +623,7 @@ def process_command(json_data):
             print("🗑️ Borrando todas las fences...")
             mavlog.mav.mission_clear_all_send(
                 mavlog.target_system, mavlog.target_component,
-                mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                mavutil.mavlink.MAV_MISSION_TYPE_FENCE
             )
             mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
             mavlog.mav.param_set_send(
@@ -645,7 +645,7 @@ def process_command(json_data):
             # Limpiar todo
             mavlog.mav.mission_clear_all_send(
                 mavlog.target_system, mavlog.target_component,
-                mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                mavutil.mavlink.MAV_MISSION_TYPE_FENCE
             )
             mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
             time.sleep(0.5)
@@ -671,7 +671,7 @@ def process_command(json_data):
             mavlog.mav.mission_count_send(
                 mavlog.target_system, mavlog.target_component,
                 len(inclusions),
-                mission_type=mavutil.mavlink.MAV_MISSION_TYPE_FENCE
+                mavutil.mavlink.MAV_MISSION_TYPE_FENCE
             )
             
             for seq, item in enumerate(inclusions):
