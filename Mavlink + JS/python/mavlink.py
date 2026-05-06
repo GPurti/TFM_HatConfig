@@ -965,7 +965,9 @@ def process_command(json_data):
 
                     takeoff_alt = waypoints[0]['alt'] if waypoints else 40
                     takeoff_cmd = {'lat': home['lat'], 'lon': home['lon'], 'alt': takeoff_alt}
-                    all_waypoints = [home, takeoff_cmd] + waypoints
+                    last_wp = waypoints[-1] if waypoints else takeoff_cmd
+                    loiter_wp = {'lat': last_wp['lat'], 'lon': last_wp['lon'], 'alt': last_wp['alt']}
+                    all_waypoints = [home, takeoff_cmd] + waypoints + [loiter_wp]
 
                     print(f"📦 Subiendo {len(all_waypoints)} items...")
                     mavlog.mav.mission_count_send(
@@ -988,6 +990,8 @@ def process_command(json_data):
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
                         elif i == 1:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+                        elif i == len(all_waypoints) - 1:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM
                         else:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
 
@@ -1043,7 +1047,9 @@ def process_command(json_data):
 
                     takeoff_alt = waypoints[0]['alt'] if waypoints else 50
                     takeoff_cmd = {'lat': home['lat'], 'lon': home['lon'], 'alt': takeoff_alt}
-                    all_waypoints = [home, takeoff_cmd] + waypoints
+                    last_wp = waypoints[-1] if waypoints else takeoff_cmd
+                    loiter_wp = {'lat': last_wp['lat'], 'lon': last_wp['lon'], 'alt': last_wp['alt']}
+                    all_waypoints = [home, takeoff_cmd] + waypoints + [loiter_wp]
 
                     print(f"📦 Enviando misión con {len(all_waypoints)} comandos")
                     mavlog.mav.mission_count_send(
@@ -1063,6 +1069,8 @@ def process_command(json_data):
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
                         elif i == 1:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+                        elif i == len(all_waypoints) - 1:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_LOITER_UNLIM
                         else:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
 
