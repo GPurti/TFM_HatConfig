@@ -1008,92 +1008,106 @@ def process_command(json_data):
             return
 
         elif action == 'AUTO':
-            print("🔄 Cambiando a modo GUIDED (preparando misión AUTO)...")
-            mavlog.mav.command_long_send(
-                mavlog.target_system,
-                mavlog.target_component,
-                mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                0,
-                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                4,
-                0, 0, 0, 0, 0
-            )
-            
-            ack = mavlog.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
-            if ack is None or getattr(ack, 'result', None) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                print(f"❌ Error al cambiar a modo GUIDED: {ack}")
-                return
-            print("✅ Modo GUIDED establecido")
-            time.sleep(2)
-            
-            print("🗑️ Limpiando misión actual...")
-            mavlog.mav.mission_clear_all_send(mavlog.target_system, mavlog.target_component)
-            ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
-            if ack is None or getattr(ack, 'type', None) != mavutil.mavlink.MAV_MISSION_ACCEPTED:
-                print(f"❌ Error al limpiar la misión: {ack}")
-                return
-            print("✅ Misión actual limpiada")
-            
-            home = get_home_position()
-            if home is None:
-                return
-            
-            takeoff_alt = waypoints[0]['alt'] if waypoints else 50
-            takeoff_cmd = {'lat': home['lat'], 'lon': home['lon'], 'alt': takeoff_alt}
-            all_waypoints = [home, takeoff_cmd] + waypoints
+            with mavlink_io_lock:
+                try:
+                    print("🔄 Cambiando a modo GUIDED (preparando misión AUTO)...")
+                    mavlog.mav.command_long_send(
+                        mavlog.target_system,
+                        mavlog.target_component,
+                        mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                        0,
+                        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        4,
+                        0, 0, 0, 0, 0
+                    )
 
-            print(f"📦 Enviando misión con {len(all_waypoints)} comandos")
-            mavlog.mav.mission_count_send(mavlog.target_system, mavlog.target_component, len(all_waypoints))
+                    ack = mavlog.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
+                    if ack is None or getattr(ack, 'result', None) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                        print(f"❌ Error al cambiar a modo GUIDED: {ack}")
+                        return
+                    print("✅ Modo GUIDED establecido")
+                    time.sleep(2)
 
-            for i, wp in enumerate(all_waypoints):
-                req = mavlog.recv_match(type=['MISSION_REQUEST','MISSION_REQUEST_INT'], blocking=True, timeout=5)
-                if not req or req.seq != i:
-                    print(f"❌ Error en secuencia: esperado {i}, recibido {getattr(req,'seq',None)}")
-                    return
+                    print("🗑️ Limpiando misión actual...")
+                    mavlog.mav.mission_clear_all_send(
+                        mavlog.target_system, mavlog.target_component,
+                        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+                    )
+                    ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
+                    if ack is None or getattr(ack, 'type', None) != mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                        print(f"❌ Error al limpiar la misión: {ack}")
+                        return
+                    print("✅ Misión actual limpiada")
 
-                frame = mavutil.mavlink.MAV_FRAME_GLOBAL if i == 0 else mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
-                if i == 0:
-                    cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
-                elif i == 1:
-                    cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
-                elif i == len(all_waypoints) - 1:
-                    cmd = mavutil.mavlink.MAV_CMD_NAV_LAND
-                else:
-                    cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+                    home = get_home_position()
+                    if home is None:
+                        return
 
-                send_waypoint_custom(i, wp, frame, cmd, is_first=(i == 0))
-            
-            ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=10)
-            if not ack or getattr(ack, 'type', None) != mavutil.mavlink.MAV_MISSION_ACCEPTED:
-                print(f"❌ Error en confirmación final: {ack}")
-                return
-            print("✅ Misión configurada correctamente")
+                    takeoff_alt = waypoints[0]['alt'] if waypoints else 50
+                    takeoff_cmd = {'lat': home['lat'], 'lon': home['lon'], 'alt': takeoff_alt}
+                    all_waypoints = [home, takeoff_cmd] + waypoints
 
-            print("🔓 Armando el dron...")
-            mavlog.mav.command_long_send(mavlog.target_system, mavlog.target_component,
-                                         mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
-                                         0, 1, 0, 0, 0, 0, 0, 0)
-            time.sleep(2)
+                    print(f"📦 Enviando misión con {len(all_waypoints)} comandos")
+                    mavlog.mav.mission_count_send(
+                        mavlog.target_system, mavlog.target_component,
+                        len(all_waypoints),
+                        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+                    )
 
-            print("🔄 Cambiando a modo AUTO...")
-            mavlog.mav.command_long_send(mavlog.target_system, mavlog.target_component,
-                                         mavutil.mavlink.MAV_CMD_DO_SET_MODE,
-                                         0, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 3, 0, 0, 0, 0, 0)
-            ack = mavlog.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
-            if ack is None or getattr(ack, 'result', None) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                print(f"❌ Error al cambiar a modo AUTO: {ack}")
-                return
-            print("✅ Modo AUTO establecido")
+                    for i, wp in enumerate(all_waypoints):
+                        req = mavlog.recv_match(type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'], blocking=True, timeout=5)
+                        if not req or req.seq != i:
+                            print(f"❌ Error en secuencia: esperado {i}, recibido {getattr(req,'seq',None)}")
+                            return
 
-            print("▶️ Iniciando la misión...")
-            mavlog.mav.command_long_send(mavlog.target_system, mavlog.target_component,
-                                         mavutil.mavlink.MAV_CMD_MISSION_START,
-                                         0, 0, 0, 0, 0, 0, 0, 0)
-            ack = mavlog.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
-            if ack is None or getattr(ack, 'result', None) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
-                print(f"❌ Error al iniciar la misión: {ack}")
-                return
-            print("✅ Misión iniciada correctamente")
+                        frame = mavutil.mavlink.MAV_FRAME_GLOBAL if i == 0 else mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+                        if i == 0:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+                        elif i == 1:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+                        elif i == len(all_waypoints) - 1:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_LAND
+                        else:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+
+                        send_waypoint_custom(i, wp, frame, cmd, is_first=(i == 0))
+
+                    ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=10)
+                    if not ack or getattr(ack, 'type', None) != mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                        print(f"❌ Error en confirmación final: {ack}")
+                        return
+                    print("✅ Misión configurada correctamente")
+
+                    print("🔓 Armando el dron...")
+                    mavlog.mav.command_long_send(mavlog.target_system, mavlog.target_component,
+                                                 mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM,
+                                                 0, 1, 0, 0, 0, 0, 0, 0)
+                    time.sleep(2)
+
+                    print("🔄 Cambiando a modo AUTO...")
+                    mavlog.mav.command_long_send(mavlog.target_system, mavlog.target_component,
+                                                 mavutil.mavlink.MAV_CMD_DO_SET_MODE,
+                                                 0, mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, 3, 0, 0, 0, 0, 0)
+                    ack = mavlog.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
+                    if ack is None or getattr(ack, 'result', None) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                        print(f"❌ Error al cambiar a modo AUTO: {ack}")
+                        return
+                    print("✅ Modo AUTO establecido")
+
+                    print("▶️ Iniciando la misión...")
+                    mavlog.mav.command_long_send(mavlog.target_system, mavlog.target_component,
+                                                 mavutil.mavlink.MAV_CMD_MISSION_START,
+                                                 0, 0, 0, 0, 0, 0, 0, 0)
+                    ack = mavlog.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
+                    if ack is None or getattr(ack, 'result', None) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                        print(f"❌ Error al iniciar la misión: {ack}")
+                        return
+                    print("✅ Misión iniciada correctamente")
+
+                except Exception as e:
+                    print(f"❌ Error en AUTO: {e}")
+                    import traceback
+                    traceback.print_exc()
 
         # ============================================================
         # COMANDO GUIDED (IR A PUNTO)
