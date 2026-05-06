@@ -988,8 +988,6 @@ def process_command(json_data):
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
                         elif i == 1:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
-                        elif i == len(all_waypoints) - 1:
-                            cmd = mavutil.mavlink.MAV_CMD_NAV_LAND
                         else:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
 
@@ -1065,8 +1063,6 @@ def process_command(json_data):
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
                         elif i == 1:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
-                        elif i == len(all_waypoints) - 1:
-                            cmd = mavutil.mavlink.MAV_CMD_NAV_LAND
                         else:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
 
