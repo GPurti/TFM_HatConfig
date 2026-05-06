@@ -543,10 +543,11 @@ def ejecutar_emergencia(action):
     try:
         print(f"\n🚨 EJECUTANDO COMANDO: {action}")
         
-        # Solo ARM y TAKEOFF necesitan pasar por GUIDED primero.
-        # HOLD_POSITION, POSHOLD y AUTO_RESUME cambian de modo directamente;
-        # el paso por GUIDED sin target de posición hace que el dron descienda.
-        if action in ['ARM', 'TAKEOFF']:
+        # Interrumpir cualquier misión activa cambiando a GUIDED antes de
+        # ejecutar el comando. Excluimos: DISARM (no debe armar), AUTO_RESUME
+        # (gestiona su propio modo) y los que envían comandos NAV directos
+        # (RTL, LAND_NOW, EMERGENCY_STOP) que funcionan desde cualquier modo.
+        if action in ['ARM', 'TAKEOFF', 'HOLD_POSITION', 'POSHOLD']:
             mavlog.mav.command_long_send(
                 mavlog.target_system, mavlog.target_component,
                 mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
