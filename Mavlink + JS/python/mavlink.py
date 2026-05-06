@@ -35,6 +35,7 @@ voltage_battery = current_battery = battery_remaining = None
 mavlog = None
 flight_mode = None
 armed = None
+mqtt_client_global = None
 
 # ============================================================
 # Funciones de utilidad
@@ -542,7 +543,7 @@ def ejecutar_emergencia(action):
     try:
         print(f"\n🚨 EJECUTANDO COMANDO: {action}")
         
-        if action not in ['DISARM']:
+        if action not in ['DISARM',  'POSHOLD']:
             mavlog.mav.command_long_send(
                 mavlog.target_system, mavlog.target_component,
                 mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
@@ -610,6 +611,34 @@ def ejecutar_emergencia(action):
                 mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
                 5, 0, 0, 0, 0, 0
             )
+
+        elif action == 'AUTO_RESUME':
+            print("▶️ Reanudando misión AUTO...")
+            # Cambiar a modo AUTO
+            mavlog.mav.command_long_send(
+                mavlog.target_system, mavlog.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                3, 0, 0, 0, 0, 0
+            )
+            time.sleep(1)
+            # Iniciar misión explícitamente
+            mavlog.mav.command_long_send(
+                mavlog.target_system, mavlog.target_component,
+                mavutil.mavlink.MAV_CMD_MISSION_START,
+                0, 0, 0, 0, 0, 0, 0, 0
+            )
+            print("✅ Modo AUTO + MISSION_START enviados")
+
+        elif action == 'POSHOLD':
+            print("📍 Cambiando a modo POSHOLD...")
+            mavlog.mav.command_long_send(
+                mavlog.target_system, mavlog.target_component,
+                mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                16, 0, 0, 0, 0, 0  # 16 = POSHOLD
+            )
+            
         
         print(f"✅ Comando {action} ejecutado correctamente")
         
@@ -818,9 +847,162 @@ def process_command(json_data):
                     print(f"⚠️ ACK final: {ack}")
             return
 
-        # ============================================================
-        # COMANDO AUTO (MISIÓN)
-        # ============================================================
+        elif action == 'READ':
+            print("📖 Leyendo plan y fences del autopiloto...")
+            drone_uid = json_data.get('drone_uid', 'drone_aerowatch')
+            
+            with mavlink_io_lock:  # ← reemplaza telemetry_pause.clear/set
+                try:
+                    result = {}
+
+                    # Leer plan de misión
+                    mavlog.mav.mission_request_list_send(
+                        mavlog.target_system,
+                        mavlog.target_component,
+                        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+                    )
+                    count_msg = mavlog.recv_match(type='MISSION_COUNT', blocking=True, timeout=5)
+                    waypoints = []
+                    if count_msg and count_msg.count > 0:
+                        for i in range(count_msg.count):
+                            mavlog.mav.mission_request_int_send(
+                                mavlog.target_system,
+                                mavlog.target_component,
+                                i,
+                                mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+                            )
+                            item = mavlog.recv_match(type='MISSION_ITEM_INT', blocking=True, timeout=5)
+                            if item:
+                                waypoints.append({
+                                    'seq': item.seq,
+                                    'command': item.command,
+                                    'lat': item.x / 1e7,
+                                    'lng': item.y / 1e7,
+                                    'alt': float(item.z),
+                                    'frame': item.frame
+                                })
+                        mavlog.mav.mission_ack_send(
+                            mavlog.target_system,
+                            mavlog.target_component,
+                            mavutil.mavlink.MAV_MISSION_ACCEPTED,
+                            mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+                        )
+                    result['waypoints'] = waypoints
+                    print(f"✅ {len(waypoints)} waypoints leídos")
+
+                    # Leer fences
+                    fences = get_existing_fences()
+                    inclusion = []
+                    exclusion_zones = []
+                    current_exclusion = []
+                    
+                    for item in fences:
+                        if item['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION:
+                            inclusion.append({'lat': item['lat'], 'lng': item['lon']})
+                        elif item['command'] == mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION:
+                            current_exclusion.append({'lat': item['lat'], 'lng': item['lon']})
+                            if len(current_exclusion) == int(item['param1']):
+                                exclusion_zones.append(current_exclusion)
+                                current_exclusion = []
+
+                    result['inclusion_fence'] = inclusion
+                    result['exclusion_fences'] = exclusion_zones
+                    print(f"✅ Fences: {len(inclusion)} inclusión, {len(exclusion_zones)} exclusión")
+
+                    # Publicar resultado por MQTT
+                    read_topic = f"{drone_uid}_read_response"
+                    payload = json.dumps(result)
+                    
+                    if mqtt_client_global:
+                        mqtt_client_global.publish(read_topic, payload, qos=1)
+                        print(f"✅ Datos publicados en {read_topic}")
+                    else:
+                        print("❌ No hay cliente MQTT disponible")
+
+                except Exception as e:
+                    print(f"❌ Error en READ: {e}")
+                    import traceback
+                    traceback.print_exc()
+            return
+        
+        elif action == 'UPLOAD_PLAN':
+            print("📤 Subiendo plan de waypoints SIN ejecutar...")
+            with mavlink_io_lock:
+                try:
+                    # Cambiar a GUIDED para poder modificar la misión
+                    mavlog.mav.command_long_send(
+                        mavlog.target_system, mavlog.target_component,
+                        mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                        mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                        4, 0, 0, 0, 0, 0
+                    )
+                    ack = mavlog.recv_match(type='COMMAND_ACK', blocking=True, timeout=5)
+                    if ack is None or getattr(ack, 'result', None) != mavutil.mavlink.MAV_RESULT_ACCEPTED:
+                        print(f"❌ Error cambiando a GUIDED: {ack}")
+                        return
+                    print("✅ Modo GUIDED establecido")
+                    time.sleep(1)
+
+                    # Limpiar misión actual
+                    mavlog.mav.mission_clear_all_send(
+                        mavlog.target_system, mavlog.target_component,
+                        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+                    )
+                    ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=5)
+                    if ack is None or getattr(ack, 'type', None) != mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                        print(f"❌ Error limpiando misión: {ack}")
+                        return
+                    print("✅ Misión limpiada")
+
+                    # Obtener home
+                    home = get_home_position()
+                    if home is None:
+                        return
+
+                    takeoff_alt = waypoints[0]['alt'] if waypoints else 40
+                    takeoff_cmd = {'lat': home['lat'], 'lon': home['lon'], 'alt': takeoff_alt}
+                    all_waypoints = [home, takeoff_cmd] + waypoints
+
+                    print(f"📦 Subiendo {len(all_waypoints)} items...")
+                    mavlog.mav.mission_count_send(
+                        mavlog.target_system, mavlog.target_component,
+                        len(all_waypoints),
+                        mavutil.mavlink.MAV_MISSION_TYPE_MISSION
+                    )
+
+                    for i, wp in enumerate(all_waypoints):
+                        req = mavlog.recv_match(
+                            type=['MISSION_REQUEST', 'MISSION_REQUEST_INT'],
+                            blocking=True, timeout=5
+                        )
+                        if not req or req.seq != i:
+                            print(f"❌ Error secuencia: esperado {i}, recibido {getattr(req,'seq',None)}")
+                            return
+
+                        frame = mavutil.mavlink.MAV_FRAME_GLOBAL if i == 0 else mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+                        if i == 0:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+                        elif i == 1:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
+                        elif i == len(all_waypoints) - 1:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_LAND
+                        else:
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
+
+                        send_waypoint_custom(i, wp, frame, cmd, is_first=(i == 0))
+
+                    ack = mavlog.recv_match(type='MISSION_ACK', blocking=True, timeout=10)
+                    if not ack or getattr(ack, 'type', None) != mavutil.mavlink.MAV_MISSION_ACCEPTED:
+                        print(f"❌ Error confirmación final: {ack}")
+                        return
+                    print("✅ Plan subido correctamente — listo para ejecutar con AUTO")
+
+                except Exception as e:
+                    print(f"❌ Error en UPLOAD_PLAN: {e}")
+                    import traceback
+                    traceback.print_exc()
+            return
+
         elif action == 'AUTO':
             print("🔄 Cambiando a modo GUIDED (preparando misión AUTO)...")
             mavlog.mav.command_long_send(
@@ -974,6 +1156,8 @@ def mqtt_publisher(broker_pub, port_pub, topic_pub, broker_sub, port_sub, topic_
     try:
         client.connect(broker_pub, port_pub)
         client.loop_start()
+        global mqtt_client_global
+        mqtt_client_global = client
         print(f"✅ Cliente MQTT de telemetría activo. Publicando en: {topic_pub}")
     except Exception as e:
         print(f"❌ Error conectando al broker MQTT: {e}")
@@ -1099,8 +1283,8 @@ def action_handler():
 
         action = msg.get('action')
         
-        acciones_emergencia = ['ARM', 'TAKEOFF', 'DISARM', 'EMERGENCY_STOP', 'RTL', 'LAND_NOW', 'HOLD_POSITION']
-        acciones_normales = ['AUTO', 'GUIDED', 'FENCE', 'EXCLUSION_FENCE', 'CLEAR_FENCES', 'CLEAR_EXCLUSION_FENCES', 'CLEAR_INCLUSION_FENCE']
+        acciones_emergencia = ['ARM', 'TAKEOFF', 'DISARM', 'EMERGENCY_STOP', 'RTL', 'LAND_NOW', 'HOLD_POSITION', 'AUTO_RESUME', 'POSHOLD']
+        acciones_normales = ['AUTO', 'GUIDED', 'FENCE', 'EXCLUSION_FENCE', 'CLEAR_FENCES', 'CLEAR_EXCLUSION_FENCES', 'CLEAR_INCLUSION_FENCE',  'READ', 'UPLOAD_PLAN']
         
         if action in acciones_emergencia:
             print(f"🚨 Comando de emergencia: {action}")
