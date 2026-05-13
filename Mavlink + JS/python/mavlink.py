@@ -11,6 +11,7 @@ import paho.mqtt.client as paho
 import math
 import threading
 from flask import Flask, request
+import os
 
 app = Flask(__name__)
 
@@ -36,6 +37,7 @@ mavlog = None
 flight_mode = None
 armed = None
 mqtt_client_global = None
+drone_id = None
 
 # ============================================================
 # Funciones de utilidad
@@ -851,7 +853,7 @@ def process_command(json_data):
 
         elif action == 'READ':
             print("📖 Leyendo plan y fences del autopiloto...")
-            drone_uid = json_data.get('drone_uid', 'drone_aerowatch')
+            drone_uid = json_data.get('drone_uid', drone_id)
             
             with mavlink_io_lock:  # ← reemplaza telemetry_pause.clear/set
                 try:
@@ -1366,8 +1368,12 @@ def health_check():
 if __name__ == "__main__":
     broker = 'mqtt.catuav.com'
     port = 443
-    topic_pub = 'drone_aerowatch_telemetry'
-    topic_sub = 'drone_aerowatch_action'
+    config_path = os.path.join(os.path.dirname(__file__), 'config.txt')
+    with open(config_path, 'r') as f:
+        drone_id = f.read().strip()
+
+    topic_pub = f'{drone_id}_telemetry'
+    topic_sub = f'{drone_id}_action'
 
     print("=" * 60)
     print("🚁 DRONE MAVLINK BRIDGE - SCRIPT COMPLETO")

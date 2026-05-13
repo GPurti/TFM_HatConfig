@@ -3,7 +3,14 @@ const mqtt = require("mqtt");
 const brokerUrl = "wss://mqtt.catuav.com:443/mqtt/"; 
 const mqttUser = "bcn";
 const mqttPass = "Barcelona_1234";
-const topicSub = "drone_aerowatch_action";
+const fs = require("fs");
+const path = require("path");
+
+// Llegir drone_id del config.txt
+const configPath = path.join(__dirname, "../python/config.txt");
+const droneId = fs.readFileSync(configPath, "utf8").trim();
+
+const topicSub = `${droneId}_action`;
 
 const pythonUrl = "http://127.0.0.1:5000/action";
 
