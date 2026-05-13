@@ -263,12 +263,11 @@ def _send_fence_locked(vertices, breach_action='RTL'):
     )
     fence_type = 12 if has_exclusion else 4  # 4+8=12 ambas, 4=solo inclusión
 
-    # 3. Parámetros
+    # 3. Parámetros ((b'FENCE_ACTION', action_value),)
     print("1️⃣ Configurando parámetros...")
     params = [
         (b'FENCE_ENABLE', 1),
         (b'FENCE_TYPE', fence_type),
-        (b'FENCE_ACTION', action_value),
         (b'FENCE_ALT_MAX', 100),
     ]
     for param_name, param_value in params:
@@ -431,12 +430,11 @@ def _send_exclusion_fence_locked(zones, breach_action='RTL'):
     # Nuevo tipo: inclusión (4) + exclusión (8) si hay ambas, o solo exclusión (8)
     fence_type = 12 if has_inclusion else 8  # 4+8=12 ambas, 8=solo exclusión
 
-    # 3. Parámetros
+    # 3. Parámetros ((b'FENCE_ACTION', action_value),)
     print("1️⃣ Configurando parámetros...")
     params = [
         (b'FENCE_ENABLE', 1),
         (b'FENCE_TYPE', fence_type),
-        (b'FENCE_ACTION', action_value),
         (b'FENCE_ALT_MAX', 100),
     ]
     for param_name, param_value in params:
@@ -972,6 +970,11 @@ def process_command(json_data):
                         mavlog.target_system, mavlog.target_component,
                         len(all_waypoints)
                     )
+                    FRAME_MAP = {
+                        'relative': mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                        'absolute': mavutil.mavlink.MAV_FRAME_GLOBAL,
+                        'terrain':  mavutil.mavlink.MAV_FRAME_GLOBAL_TERRAIN_ALT_INT
+                    }
 
                     for i, wp in enumerate(all_waypoints):
                         req = mavlog.recv_match(
@@ -982,13 +985,19 @@ def process_command(json_data):
                             print(f"❌ Error secuencia: esperado {i}, recibido {getattr(req,'seq',None)}")
                             return
 
-                        frame = mavutil.mavlink.MAV_FRAME_GLOBAL if i == 0 else mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+                        if i == 0:
+                            frame = mavutil.mavlink.MAV_FRAME_GLOBAL
+                        elif i == 1:
+                            frame = mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+                        else:
+                            wp_frame = wp.get('frame', 'relative')
+                            frame = FRAME_MAP.get(wp_frame, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT)
                         if i == 0:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
                         elif i == 1:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
                         elif i == len(all_waypoints) - 1:
-                            cmd = mavutil.mavlink.MAV_CMD_NAV_LAND
+                            cmd = mavutil.mavlink.MAV_CMD_NAV_RETURN_TO_LAUNCH
                         else:
                             cmd = mavutil.mavlink.MAV_CMD_NAV_WAYPOINT
 
