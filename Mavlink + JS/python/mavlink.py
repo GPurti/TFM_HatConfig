@@ -38,6 +38,7 @@ flight_mode = None
 armed = None
 mqtt_client_global = None
 drone_id = None
+uav_type = None
 
 # ============================================================
 # Funciones de utilidad
@@ -177,15 +178,43 @@ def process_mavlink_message(msg):
     
     elif msg.get_type() == 'HEARTBEAT':
         try:
-            global flight_mode, armed
+            global flight_mode, armed, uav_type
             ARDUCOPTER_MODES = {
                 0: 'STABILIZE', 1: 'ACRO', 2: 'ALT_HOLD', 3: 'AUTO',
                 4: 'GUIDED', 5: 'LOITER', 6: 'RTL', 7: 'CIRCLE',
                 9: 'LAND', 11: 'DRIFT', 13: 'SPORT', 16: 'POSHOLD',
                 17: 'BRAKE', 18: 'THROW', 21: 'SMART_RTL'
             }
-            armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
-            flight_mode = ARDUCOPTER_MODES.get(msg.custom_mode, f'MODE_{msg.custom_mode}')
+
+            ARDUPLANE_MODES = {
+                0: 'MANUAL', 1: 'CIRCLE', 2: 'STABILIZE', 3: 'TRAINING', 4: 'ACRO',
+                5: 'FBWA', 6: 'FBWB', 7: 'CRUISE', 8: 'AUTOTUNE',
+                10: 'AUTO', 11: 'RTL', 12: 'LOITER', 13: 'TAKEOFF',
+                14: 'AVOID_ADSB', 15: 'GUIDED', 17: 'QSTABILIZE',
+                18: 'QHOVER', 19: 'QLOITER', 20: 'QLAND', 21: 'QRTL'
+            }
+
+            UAV_TYPES = {
+                0: 'generic',
+                1: 'fixed_wing',
+                2: 'quadcopter',
+                3: 'coaxial',
+                4: 'helicopter',
+                13: 'hexacopter',
+                14: 'octocopter',
+                15: 'tricopter',
+            }
+            VALID_UAV_TYPES = {0, 1, 2, 3, 4, 13, 14, 15} 
+            if msg.type in UAV_TYPES:
+                uav_type = UAV_TYPES.get(msg.type)
+                armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+                if uav_type == 'fixed_wing':
+                    flight_mode = ARDUPLANE_MODES.get(msg.custom_mode, f'MODE_{msg.custom_mode}')
+                else:
+                    flight_mode = ARDUCOPTER_MODES.get(msg.custom_mode, f'MODE_{msg.custom_mode}')
+            else:
+                # És un GCS o component desconegut — ignorar mode i armed
+                return
         except:
             pass
 
@@ -543,18 +572,17 @@ def ejecutar_emergencia(action):
     try:
         print(f"\n🚨 EJECUTANDO COMANDO: {action}")
         
-        # Interrumpir cualquier misión activa cambiando a GUIDED antes de
-        # ejecutar el comando. Excluimos: DISARM (no debe armar), AUTO_RESUME
-        # (gestiona su propio modo) y los que envían comandos NAV directos
-        # (RTL, LAND_NOW, EMERGENCY_STOP) que funcionan desde cualquier modo.
-        if action in ['ARM', 'TAKEOFF', 'HOLD_POSITION', 'POSHOLD']:
-            mavlog.mav.command_long_send(
-                mavlog.target_system, mavlog.target_component,
-                mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
-                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                4, 0, 0, 0, 0, 0
-            )
-            time.sleep(1)
+        if action not in ['DISARM', 'HOLD_POSITION', 'POSHOLD', 'AUTO_RESUME', 'MANUAL']:
+            # Per fixed wing NO canviar a GUIDED primer
+            if uav_type != 'fixed_wing':
+                print(f"🔄 Canviant a GUIDED abans de {action}...")
+                mavlog.mav.command_long_send(
+                    mavlog.target_system, mavlog.target_component,
+                    mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    4, 0, 0, 0, 0, 0
+                )
+                time.sleep(1)
         
         if action == 'ARM':
             print("🔓 ARMANDO dron...")
@@ -566,13 +594,20 @@ def ejecutar_emergencia(action):
             print("✅ Comando ARM enviado")
             
         elif action == 'TAKEOFF':
-            print("🛫 DESPEGANDO a 20m...")
-            mavlog.mav.command_long_send(
-                mavlog.target_system, mavlog.target_component,
-                mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
-                0, 0, 0, 0, 0, 0, 20
-            )
-            print("✅ Comando TAKEOFF enviado")
+            if uav_type == 'fixed_wing':
+                print("🛫 TAKEOFF fixed wing...")
+                mavlog.mav.set_mode_send(
+                    mavlog.target_system,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    13  # TAKEOFF ArduPlane
+                )
+            else:
+                print("🛫 DESPEGANDO a 20m...")
+                mavlog.mav.command_long_send(
+                    mavlog.target_system, mavlog.target_component,
+                    mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0,
+                    0, 0, 0, 0, 0, 0, 20
+                )
             
         elif action == 'DISARM':
             print("🔓 Desarmando dron...")
@@ -600,21 +635,36 @@ def ejecutar_emergencia(action):
             )
             
         elif action == 'LAND_NOW':
-            print("🛬 Aterrizando inmediatamente...")
-            mavlog.mav.command_long_send(
-                mavlog.target_system, mavlog.target_component,
-                mavutil.mavlink.MAV_CMD_NAV_LAND, 0,
-                0, 0, 0, 0, 0, 0, 0
-            )
+            if uav_type == 'fixed_wing':
+                print("✈️ Canviant a mode CRUISE...")
+                mavlog.mav.set_mode_send(
+                    mavlog.target_system,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    7  # CRUISE ArduPlane
+                )
+            else:
+                print("🛬 Aterrizando inmediatamente...")
+                mavlog.mav.command_long_send(
+                    mavlog.target_system, mavlog.target_component,
+                    mavutil.mavlink.MAV_CMD_NAV_LAND, 0,
+                    0, 0, 0, 0, 0, 0, 0
+                )
             
         elif action == 'HOLD_POSITION':
-            print("⏸️ Manteniendo posición (LOITER)...")
-            mavlog.mav.command_long_send(
-                mavlog.target_system, mavlog.target_component,
-                mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
-                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-                5, 0, 0, 0, 0, 0
-            )
+            if uav_type == 'fixed_wing':
+                print("⏸️ LOITER (fixed wing)...")
+                mavlog.mav.set_mode_send(
+                    mavlog.target_system,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    12  # LOITER ArduPlane
+                )
+            else:
+                print("⏸️ Manteniendo posición (LOITER quadcopter)...")
+                mavlog.mav.set_mode_send(
+                    mavlog.target_system,
+                    mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                    5  # LOITER ArduCopter
+                )
 
         elif action == 'AUTO_RESUME':
             print("▶️ Reanudando misión AUTO...")
@@ -641,6 +691,14 @@ def ejecutar_emergencia(action):
                 mavutil.mavlink.MAV_CMD_DO_SET_MODE, 0,
                 mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
                 16, 0, 0, 0, 0, 0  # 16 = POSHOLD
+            )
+
+        elif action == 'MANUAL':
+            print("🕹️ Cambiando a modo MANUAL...")
+            mavlog.mav.set_mode_send(
+                mavlog.target_system,
+                mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
+                0  # MANUAL per fixed wing
             )
             
         
@@ -1245,8 +1303,9 @@ def mqtt_publisher(broker_pub, port_pub, topic_pub, broker_sub, port_sub, topic_
                 'roll': roll,
                 'yaw': yaw,
                 'voltage_battery': voltage_battery,
-                'flight_mode': flight_mode,   # ← añade
+                'flight_mode': flight_mode,   
                 'armed': armed,
+                'uav_type': uav_type,
                 'drone_id': f"{mavlog.target_system}_{mavlog.target_component}"
             }
             payload = json.dumps(msg, indent=4)
@@ -1313,7 +1372,7 @@ def action_handler():
 
         action = msg.get('action')
         
-        acciones_emergencia = ['ARM', 'TAKEOFF', 'DISARM', 'EMERGENCY_STOP', 'RTL', 'LAND_NOW', 'HOLD_POSITION', 'AUTO_RESUME', 'POSHOLD']
+        acciones_emergencia = ['ARM', 'TAKEOFF', 'DISARM', 'EMERGENCY_STOP', 'RTL', 'LAND_NOW', 'HOLD_POSITION', 'AUTO_RESUME', 'POSHOLD', 'MANUAL']
         acciones_normales = ['AUTO', 'GUIDED', 'FENCE', 'EXCLUSION_FENCE', 'CLEAR_FENCES', 'CLEAR_EXCLUSION_FENCES', 'CLEAR_INCLUSION_FENCE',  'READ', 'UPLOAD_PLAN']
         
         if action in acciones_emergencia:
